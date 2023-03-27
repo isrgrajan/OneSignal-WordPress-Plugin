@@ -16,9 +16,13 @@ function load_javascript()
 {
     global $post;
     if ($post) {
-        wp_register_script('notice_script', plugins_url('notice.js', __FILE__), array('jquery'), '1.1', true);
-        wp_enqueue_script('notice_script');
-        wp_localize_script('notice_script', 'ajax_object', array('ajax_url' => admin_url('admin-ajax.php'), 'post_id' => $post->ID));
+      wp_register_script('notice_script', plugins_url('notice.js', __FILE__), array('jquery'), '1.1', true);
+      wp_enqueue_script('notice_script');
+      wp_localize_script('notice_script', 'ajax_object', array('ajax_url' => admin_url('admin-ajax.php'), 'post_id' => $post->ID));
+
+    // Register and enqueue your custom JavaScript file
+      wp_register_script('get_recipients_script', plugins_url('get-recipients.js', __FILE__), array('jquery'), '1.0', true);
+      wp_enqueue_script('get_recipients_script');
     }
 }
 
@@ -60,6 +64,65 @@ function has_metadata()
 
     exit;
 }
+
+function get_recipients() {
+    $notification_id = $_POST['notification_id'];
+    $onesignal_wp_settings = OneSignal::get_onesignal_settings();
+    $onesignal_auth_key = $onesignal_wp_settings['app_rest_api_key'];
+
+    // Make the second API call
+    $notifications_get_request_url = 'https://onesignal.com/api/v1/notifications/' . $notification_id . '?app_id=' . $onesignal_wp_settings['app_id'];
+    $notifications_get_request = array(
+        'headers' => array(
+            'content-type' => 'application/json;charset=utf-8',
+            'Authorization' => 'Basic ' . $onesignal_auth_key,
+        ),
+        'timeout' => 3,
+    );
+    $notifications_get_response = wp_remote_get($notifications_get_request_url, $notifications_get_request);
+
+    if (!is_wp_error($notifications_get_response) && isset($notifications_get_response['body'])) {
+      $notifications_get_response_body = json_decode($notifications_get_response['body'], true);
+      if (isset($notifications_get_response_body['successful'])) {
+          $recipient_count = $notifications_get_response_body['successful'];
+      }
+  }
+
+  // updates meta so that recipient count is available for GET request from client
+  update_post_meta($post->ID, 'recipients', $recipient_count);
+  if (isset($notifications_get_response['response'])) {
+      $status = $notifications_get_response['response']['code'];
+  }
+
+  update_post_meta($post->ID, 'response_body', wp_json_encode($notifications_get_response_body));
+  update_post_meta($post->ID, 'status', $status);
+
+  $sent_or_scheduled = array_key_exists('send_after', $fields) ? 'scheduled' : 'sent';
+  $config_show_notification_send_status_message = $onesignal_wp_settings['show_notification_send_status_message'] === true;
+
+  if ($config_show_notification_send_status_message) {
+      if ($recipient_count !== 0) {
+          $delivery_link_text = $sent_or_scheduled === 'sent' ? ' Go to your app\'s "Delivery" tab to check sent messages: <a target="_blank" href="https://app.onesignal.com/apps/">https://app.onesignal.com/apps/</a>' : '';
+          set_transient('onesignal_transient_success', '<div class="updated notice notice-success is-dismissible">
+<div class="components-notice__content">
+<p><strong>OneSignal Push:</strong><em> Successfully '.$sent_or_scheduled.' a notification to '.$recipient_count.' recipients.'.$delivery_link_text.'</em></p>
+</div>
+</div>', 86400);
+      } else {
+          set_transient('onesignal_transient_success', '<div class="updated notice notice-success is-dismissible">
+  <p><strong>OneSignal Push:</strong><em>There were no recipients. You likely have no subscribers.</em></p>
+</div>', 86400);
+      }
+  }
+
+    // Return an appropriate response and exit
+    wp_send_json_success();
+}
+
+
+// Add AJAX handlers for the scheduled function
+add_action('wp_ajax_my_scheduled_function', 'get_recipients');
+add_action('wp_ajax_nopriv_my_scheduled_function', 'get_recipients');
 
 class OneSignal_Admin
 {
@@ -948,36 +1011,21 @@ class OneSignal_Admin
                 </div>', 86400);
                     }
                 } else {
+                  // 200 OK
                     if (!empty($response)) {
-
                         // API can send a 200 OK even if the notification failed to send
                         if (isset($response['body'])) {
                             $response_body = json_decode($response['body'], true);
-                            if (isset($response_body['recipients'])) {
-                                $recipient_count = $response_body['recipients'];
+                            if (isset($response_body['id'])) {
+                                $notification_id = $response_body['id'];
                             }
                         }
 
-                        // updates meta so that recipient count is available for GET request from client
-                        update_post_meta($post->ID, 'recipients', $recipient_count);
-
-                        $sent_or_scheduled = array_key_exists('send_after', $fields) ? 'scheduled' : 'sent';
-                        $config_show_notification_send_status_message = $onesignal_wp_settings['show_notification_send_status_message'] === true;
-
-                        if ($config_show_notification_send_status_message) {
-                            if ($recipient_count !== 0) {
-                                $delivery_link_text = $sent_or_scheduled === 'sent' ? ' Go to your app\'s "Delivery" tab to check sent messages: <a target="_blank" href="https://app.onesignal.com/apps/">https://app.onesignal.com/apps/</a>' : '';
-                                set_transient('onesignal_transient_success', '<div class="updated notice notice-success is-dismissible">
-                  <div class="components-notice__content">
-                  <p><strong>OneSignal Push:</strong><em> Successfully '.$sent_or_scheduled.' a notification to '.$recipient_count.' recipients.'.$delivery_link_text.'</em></p>
-                  </div>
-                    </div>', 86400);
-                            } else {
-                                set_transient('onesignal_transient_success', '<div class="updated notice notice-success is-dismissible">
-                        <p><strong>OneSignal Push:</strong><em>There were no recipients. You likely have no subscribers.</em></p>
-                    </div>', 86400);
-                            }
-                        }
+                        // Localize the script to pass the required data
+                        wp_localize_script('get_recipients_script', 'os_data', array(
+                            'ajax_url' => admin_url('admin-ajax.php'),
+                            'notification_id' => $notification_id,
+                        ));
                     }
                 }
 
